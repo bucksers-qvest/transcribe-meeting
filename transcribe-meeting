@@ -1,0 +1,307 @@
+#!/bin/sh
+'''':'
+# Check if uv is installed; if missing, auto-install via Homebrew or curl installer
+if ! command -v uv >/dev/null 2>&1; then
+    echo "[*] 'uv' is required but not found."
+    if command -v brew >/dev/null 2>&1; then
+        echo "[*] Installing 'uv' via Homebrew..."
+        brew install uv || { echo "[!] Failed to install uv via brew."; exit 1; }
+    else
+        echo "[*] Homebrew not found. Installing 'uv' via official installer..."
+        curl -LsSf https://astral.sh/uv/install.sh | sh || { echo "[!] Failed to install uv."; exit 1; }
+        export PATH="$HOME/.local/bin:$PATH"
+    fi
+fi
+
+# Hand off execution to uv
+exec uv run --script "$0" "$@"
+'''
+# /// script
+# requires-python = ">=3.10"
+# dependencies = [
+#     "mlx-whisper",
+#     "av",
+#     "numpy",
+# ]
+# ///
+"""
+transcribe-meeting: Local, offline transcription for video and audio files using Apple Silicon MLX.
+Outputs LLM-optimized Markdown, structured JSON, and plain text transcripts.
+"""
+
+import os
+import sys
+
+# Enforce offline mode for Hugging Face Hub (prevents outbound commit checks / telemetry)
+os.environ.setdefault("HF_HUB_OFFLINE", "1")
+os.environ.setdefault("TRANSFORMERS_OFFLINE", "1")
+
+import time
+import json
+import argparse
+from pathlib import Path
+import numpy as np
+import av
+
+
+def format_timestamp(seconds: float) -> str:
+    hrs = int(seconds // 3600)
+    mins = int((seconds % 3600) // 60)
+    secs = int(seconds % 60)
+    if hrs > 0:
+        return f"{hrs:02d}:{mins:02d}:{secs:02d}"
+    return f"{mins:02d}:{secs:02d}"
+
+
+def extract_audio_if_video(input_path: Path, output_dir: Path) -> Path:
+    """Extracts or remuxes audio track if the input file is a video."""
+    video_exts = {".mp4", ".mov", ".mkv", ".webm", ".avi", ".m4v"}
+    if input_path.suffix.lower() not in video_exts:
+        return input_path
+
+    audio_out = output_dir / f"{input_path.stem}.m4a"
+    if audio_out.exists() and audio_out.stat().st_size > 0:
+        print(f"[+] Audio file already exists: {audio_out.name} (skipping extraction)")
+        return audio_out
+
+    print(f"[*] Extracting audio stream from {input_path.name} to {audio_out.name}...")
+    t0 = time.time()
+    input_container = av.open(str(input_path))
+    audio_streams = [s for s in input_container.streams if s.type == "audio"]
+    if not audio_streams:
+        input_container.close()
+        raise RuntimeError(f"No audio stream found in {input_path.name}")
+
+    audio_stream = audio_streams[0]
+    output_container = av.open(str(audio_out), mode="w", format="ipod")
+    out_stream = output_container.add_stream_from_template(audio_stream)
+
+    packet_count = 0
+    for packet in input_container.demux(audio_stream):
+        if packet.dts is None:
+            continue
+        packet.stream = out_stream
+        output_container.mux(packet)
+        packet_count += 1
+
+    output_container.close()
+    input_container.close()
+    print(f"[+] Audio extracted in {time.time()-t0:.1f}s ({packet_count:,} packets) -> {audio_out.name}")
+    return audio_out
+
+
+def decode_audio_to_array(audio_path: Path, target_sr: int = 16000) -> np.ndarray:
+    """Decodes audio to a 16kHz float32 NumPy array without needing external ffmpeg binary."""
+    print(f"[*] Decoding audio from {audio_path.name}...")
+    t0 = time.time()
+    container = av.open(str(audio_path))
+    if not container.streams.audio:
+        container.close()
+        raise RuntimeError(f"No audio stream found in {audio_path.name}")
+
+    stream = container.streams.audio[0]
+    resampler = av.AudioResampler(format="flt", layout="mono", rate=target_sr)
+
+    frames = []
+    for frame in container.decode(stream):
+        for rf in resampler.resample(frame):
+            frames.append(rf.to_ndarray())
+    for rf in resampler.resample(None):
+        frames.append(rf.to_ndarray())
+
+    container.close()
+    audio_np = np.concatenate(frames, axis=1).squeeze().astype(np.float32)
+    duration_s = len(audio_np) / target_sr
+    print(f"[+] Decoded {format_timestamp(duration_s)} ({duration_s:.1f}s) in {time.time()-t0:.1f}s")
+    return audio_np
+
+
+def generate_llm_markdown(turns: list, file_name: str, duration_str: str, model_name: str) -> str:
+    md_lines = [
+        f"# Meeting Transcript: {Path(file_name).stem}",
+        "",
+        f"- **Source File:** `{file_name}`",
+        f"- **Meeting Duration:** {duration_str}",
+        f"- **Transcription Model:** `{model_name}` (Apple Silicon MLX)",
+        f"- **Estimated Conversational Turns:** {len(turns)}",
+        "",
+        "> **Note for LLMs:** This transcript is segmented into conversational turns based on natural speech pauses and cadence. Timestamps are formatted as `[HH:MM:SS - HH:MM:SS]`.",
+        "",
+        "---",
+        "",
+        "## Transcript",
+        ""
+    ]
+
+    for idx, turn in enumerate(turns, 1):
+        turn_start = format_timestamp(turn[0]["start"])
+        turn_end = format_timestamp(turn[-1]["end"])
+        turn_text = " ".join(s.get("text", "").strip() for s in turn)
+
+        md_lines.append(f"### [{turn_start} - {turn_end}] Turn {idx}")
+        md_lines.append(f"{turn_text}")
+        md_lines.append("")
+
+    return "\n".join(md_lines)
+
+
+def main():
+    description = """\
+================================================================================
+ transcribe-meeting: Local, Offline AI Transcription for Apple Silicon (MLX)
+================================================================================
+
+Extracts audio from video/audio files and produces high-accuracy transcripts
+entirely offline on your Mac using Whisper with Apple Silicon GPU acceleration.
+
+AUTOMATIC PIPELINE:
+  1. Zero Setup:        Dependencies are managed automatically via uv.
+  2. Audio Extraction:  Auto-extracts lossless .m4a if a video is provided.
+  3. In-Memory Decode:  Decodes audio directly with PyAV (no ffmpeg binary needed).
+  4. Local AI Engine:   Uses Apple Silicon MLX GPU/Neural Engine (100% private/offline).
+  5. Speaker Turns:     Segments speech based on conversational pause cadence.
+  6. Generated Outputs: Automatically saves 3 clean files in the output directory:
+       - <name>_transcript.md    (LLM-optimized with headers, turns & timestamps)
+       - <name>_transcript.json  (Full millisecond-precision structured data)
+       - <name>_transcript.txt   (Clean plain text transcript)"""
+
+    epilog = """\
+EXAMPLES:
+  # Transcribe a meeting recording with default high-accuracy model (whisper-large-v3-turbo)
+  transcribe-meeting "2026-09-23 - Meeting.mp4"
+
+  # Stream live transcription segments to the terminal as they are processed
+  transcribe-meeting "presentation.mov" --verbose
+
+  # Fast draft using smaller model (whisper-base or whisper-small)
+  transcribe-meeting "interview.m4a" --model mlx-community/whisper-base
+
+  # Custom speaker pause sensitivity (e.g. 1.5 seconds) and custom output folder
+  transcribe-meeting "working_session.mp4" --pause 1.5 -o ~/Documents/Transcripts
+
+POPULAR MLX MODELS:
+  - mlx-community/whisper-large-v3-turbo  (Default: highest accuracy, fast on M4)
+  - mlx-community/whisper-large-v3        (Original large model)
+  - mlx-community/whisper-small           (Faster, lower memory)
+  - mlx-community/whisper-base            (Fastest draft)
+"""
+
+    parser = argparse.ArgumentParser(
+        description=description,
+        epilog=epilog,
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    parser.add_argument("input_file", help="Path to video (.mp4, .mov, etc.) or audio (.m4a, .wav, etc.) file")
+    parser.add_argument(
+        "--model",
+        default="mlx-community/whisper-large-v3-turbo",
+        help="HuggingFace MLX model identifier (default: mlx-community/whisper-large-v3-turbo)",
+    )
+    parser.add_argument(
+        "--pause",
+        type=float,
+        default=1.2,
+        help="Silence threshold in seconds to detect change of speaker / conversational turn (default: 1.2s)",
+    )
+    parser.add_argument(
+        "-o", "--output-dir",
+        default=None,
+        help="Directory to save transcript files (defaults to same folder as input file)",
+    )
+    parser.add_argument(
+        "--verbose",
+        action="store_true",
+        default=False,
+        help="Print transcription segments in real time to the terminal",
+    )
+
+    args = parser.parse_args()
+
+    input_path = Path(args.input_file).expanduser().resolve()
+    if not input_path.exists():
+        print(f"[!] Error: File not found: {input_path}", file=sys.stderr)
+        sys.exit(1)
+
+    out_dir = Path(args.output_dir).expanduser().resolve() if args.output_dir else input_path.parent
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    base_name = out_dir / input_path.stem
+    out_md = Path(f"{base_name}_transcript.md")
+    out_json = Path(f"{base_name}_transcript.json")
+    out_txt = Path(f"{base_name}_transcript.txt")
+
+    print(f"=== Starting Local Transcription for: {input_path.name} ===")
+    total_start = time.time()
+
+    # 1. Extract audio if video
+    audio_path = extract_audio_if_video(input_path, out_dir)
+
+    # 2. Decode audio into memory
+    audio_np = decode_audio_to_array(audio_path)
+
+    # 3. Transcribe with MLX Whisper
+    print(f"[*] Running transcription using model '{args.model}'...")
+    import mlx_whisper
+    tx_start = time.time()
+    result = mlx_whisper.transcribe(
+        audio_np,
+        path_or_hf_repo=args.model,
+        verbose=args.verbose,
+        word_timestamps=False,
+    )
+    tx_duration = time.time() - tx_start
+    print(f"[+] Transcription complete in {tx_duration:.1f}s ({tx_duration/60:.1f} min)")
+
+    segments = result.get("segments", [])
+    duration_str = format_timestamp(segments[-1]["end"]) if segments else "Unknown"
+
+    # 4. Save raw JSON
+    with open(out_json, "w", encoding="utf-8") as f:
+        json.dump(result, f, indent=2, ensure_ascii=False)
+
+    # 5. Save plain text
+    full_text = result.get("text", "").strip()
+    with open(out_txt, "w", encoding="utf-8") as f:
+        f.write(full_text + "\n")
+
+    # 6. Group into speaker turns
+    turns = []
+    current_turn = []
+    prev_end = None
+
+    for seg in segments:
+        text = seg.get("text", "").strip()
+        if not text:
+            continue
+        seg_start = seg["start"]
+        seg_end = seg["end"]
+
+        if prev_end is not None and (seg_start - prev_end) >= args.pause:
+            if current_turn:
+                turns.append(current_turn)
+                current_turn = []
+
+        current_turn.append(seg)
+        prev_end = seg_end
+
+    if current_turn:
+        turns.append(current_turn)
+
+    # 7. Save LLM Markdown
+    md_content = generate_llm_markdown(turns, input_path.name, duration_str, args.model)
+    with open(out_md, "w", encoding="utf-8") as f:
+        f.write(md_content)
+
+    total_time = time.time() - total_start
+    print("\n=== Transcription Succeeded! ===")
+    print(f"Total time elapsed: {total_time:.1f}s ({total_time/60:.1f} min)")
+    print(f"Meeting duration:   {duration_str}")
+    print(f"Detected turns:     {len(turns)}")
+    print("\nGenerated files:")
+    print(f"  - Markdown (LLM): {out_md}")
+    print(f"  - JSON (Raw):     {out_json}")
+    print(f"  - Plain Text:     {out_txt}")
+
+
+if __name__ == "__main__":
+    main()

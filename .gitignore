@@ -1,0 +1,22 @@
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+
+# Python cache & artifacts
+__pycache__/
+*.py[cod]
+*$py.class
+.venv/
+.env
+
+# Media & Transcripts (never commit recordings or transcripts)
+*.mp4
+*.mov
+*.m4a
+*.wav
+*.mp3
+*.mkv
+*_transcript.md
+*_transcript.json
+*_transcript.txt
