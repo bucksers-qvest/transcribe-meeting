@@ -1,32 +1,9 @@
-#!/bin/sh
-'''':'
-# Check if uv is installed; if missing, auto-install via Homebrew or curl installer
-if ! command -v uv >/dev/null 2>&1; then
-    echo "[*] 'uv' is required but not found."
-    if command -v brew >/dev/null 2>&1; then
-        echo "[*] Installing 'uv' via Homebrew..."
-        brew install uv || { echo "[!] Failed to install uv via brew."; exit 1; }
-    else
-        echo "[*] Homebrew not found. Installing 'uv' via official installer..."
-        curl -LsSf https://astral.sh/uv/install.sh | sh || { echo "[!] Failed to install uv."; exit 1; }
-        export PATH="$HOME/.local/bin:$PATH"
-    fi
-fi
-
-# Hand off execution to uv
-exec uv run --script "$0" "$@"
-'''
-# /// script
-# requires-python = ">=3.10"
-# dependencies = [
-#     "mlx-whisper",
-#     "av",
-#     "numpy",
-# ]
-# ///
+#!/usr/bin/env python3
 """
 transcribe-meeting: Local, offline transcription for video and audio files using Apple Silicon MLX.
 Outputs LLM-optimized Markdown, structured JSON, and plain text transcripts.
+
+Requirements: mlx-whisper, av, numpy  (see README.md for install instructions)
 """
 
 import os
@@ -155,12 +132,11 @@ Extracts audio from video/audio files and produces high-accuracy transcripts
 entirely offline on your Mac using Whisper with Apple Silicon GPU acceleration.
 
 AUTOMATIC PIPELINE:
-  1. Zero Setup:        Dependencies are managed automatically via uv.
-  2. Audio Extraction:  Auto-extracts lossless .m4a if a video is provided.
-  3. In-Memory Decode:  Decodes audio directly with PyAV (no ffmpeg binary needed).
-  4. Local AI Engine:   Uses Apple Silicon MLX GPU/Neural Engine (100% private/offline).
-  5. Speaker Turns:     Segments speech based on conversational pause cadence.
-  6. Generated Outputs: Automatically saves 3 clean files in the output directory:
+  1. Audio Extraction:  Auto-extracts lossless .m4a if a video is provided.
+  2. In-Memory Decode:  Decodes audio directly with PyAV (no ffmpeg binary needed).
+  3. Local AI Engine:   Uses Apple Silicon MLX GPU/Neural Engine (100% private/offline).
+  4. Speaker Turns:     Segments speech based on conversational pause cadence.
+  5. Generated Outputs: Automatically saves 3 clean files in the output directory:
        - <name>_transcript.md    (LLM-optimized with headers, turns & timestamps)
        - <name>_transcript.json  (Full millisecond-precision structured data)
        - <name>_transcript.txt   (Clean plain text transcript)"""

@@ -1,7 +1,7 @@
 # transcribe-meeting
 
 > **Private, offline AI meeting transcription for macOS on Apple Silicon (M1/M2/M3/M4).**  
-> Powered by Apple MLX and OpenAI Whisper. Zero cloud transmission. Self-bootstrapping setup.
+> Powered by Apple MLX and OpenAI Whisper. Zero cloud transmission.
 
 ---
 
@@ -9,7 +9,6 @@
 
 - **100% Offline & Private:** Audio and transcripts never leave your machine. No cloud APIs, no external telemetry.
 - **Apple Silicon Hardware Acceleration:** Uses Apple's MLX framework to run Whisper directly on Apple GPU and Neural Engine.
-- **Zero-Friction Bootstrap:** Automatically detects if `uv` is installed, and installs it via Homebrew if needed.
 - **Lossless Audio Extraction:** Accepts video files (`.mp4`, `.mov`, `.mkv`, etc.) and automatically remuxes the audio into `.m4a` without re-encoding quality loss.
 - **Speaker & Turn Detection:** Detects conversational pauses (>1.2s cadence) to cleanly separate speaker turns.
 - **Multi-Format Output:**
@@ -21,30 +20,60 @@
 
 ## Requirements
 
-- **Operating System:** macOS (macOS 13 Ventura or newer recommended)
+- **OS:** macOS 13 Ventura or newer
 - **Architecture:** Apple Silicon (M1, M2, M3, M4)
-- **Homebrew:** Optional, but recommended (the script will auto-install `uv` via Homebrew if `uv` is not present).
+- **Python:** 3.10 or newer
+- **Python packages:** `mlx-whisper`, `av`, `numpy`
 
 ---
 
 ## Installation
 
-### 1. Clone the repository
-```bash
+### 1. Install Homebrew (if not already installed)
+
+```zsh
+/bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
+```
+
+### 2. Install Python
+
+```zsh
+brew install python
+```
+
+### 3. Install Python dependencies
+
+```zsh
+pip3 install mlx-whisper av numpy
+```
+
+> **Note:** `mlx-whisper` pulls in Apple's MLX framework automatically. The Whisper model weights (~800 MB for the default `whisper-large-v3-turbo`) are downloaded from Hugging Face on first run and cached locally at `~/.cache/huggingface/`.
+
+### 4. Clone the repository
+
+```zsh
 git clone https://github.com/<your-username>/transcribe-meeting.git
 cd transcribe-meeting
 ```
 
-### 2. Make it executable and add to your PATH
-```bash
+### 5. Make the script executable
+
+```zsh
 chmod +x transcribe-meeting
+```
+
+### 6. Add to your PATH
+
+```zsh
 mkdir -p ~/.local/bin
 cp transcribe-meeting ~/.local/bin/
 ```
 
-Ensure `~/.local/bin` is in your shell `PATH` (typically in `~/.zshrc`):
-```bash
-export PATH="$HOME/.local/bin:$PATH"
+Add `~/.local/bin` to your PATH in `~/.zshrc` if it isn't already:
+
+```zsh
+echo 'export PATH="$HOME/.local/bin:$PATH"' >> ~/.zshrc
+source ~/.zshrc
 ```
 
 ---
@@ -53,15 +82,14 @@ export PATH="$HOME/.local/bin:$PATH"
 
 Transcribe any video or audio file with a single command:
 
-```bash
+```zsh
 transcribe-meeting "path/to/meeting_recording.mp4"
 ```
 
 The script will automatically:
-1. Ensure `uv` is present (installing via Homebrew if needed).
-2. Extract the audio track into `.m4a` if a video file was supplied.
-3. Transcribe using `whisper-large-v3-turbo` with Apple Silicon GPU acceleration.
-4. Output `.md`, `.json`, and `.txt` files directly alongside the source file.
+1. Extract the audio track into `.m4a` if a video file was supplied.
+2. Transcribe using `whisper-large-v3-turbo` with Apple Silicon GPU acceleration.
+3. Output `.md`, `.json`, and `.txt` files directly alongside the source file.
 
 ---
 
@@ -92,7 +120,7 @@ options:
 
 ### Examples
 
-```bash
+```zsh
 # Stream live transcription segments to the terminal as they are processed
 transcribe-meeting "presentation.mov" --verbose
 
